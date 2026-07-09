@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment
+.env
+
+# YOLO model and generated files
+models/*.pt
+runs/
+static/crops/*
+!static/crops/.gitkeep
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
