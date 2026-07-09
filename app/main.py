@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLO
 from picamera2 import Picamera2
-from libcamera import controls
+from libcamera import controls, Transform
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -22,6 +22,7 @@ MODEL_PATH = os.getenv("MODEL_PATH", "./best.pt")
 YOLO_CONF = float(os.getenv("YOLO_CONF", "0.30"))
 CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "1280"))
 CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "720"))
+ROTATE_CAMERA_180=os.getenv("ROTATE_CAMERA_180", "false").lower() == "true"
 
 MODEL_PATH = str((BASE_DIR / MODEL_PATH).resolve())
 
@@ -63,11 +64,17 @@ print("YOLO model loaded.")
 print("Starting Raspberry Pi Camera Module 3...")
 camera = Picamera2()
 
+camera_transform = Transform(
+    hflip=1 if ROTATE_CAMERA_180 else 0,
+    vflip=1 if ROTATE_CAMERA_180 else 0,
+)
+
 camera_config = camera.create_video_configuration(
     main={
         "size": (CAMERA_WIDTH, CAMERA_HEIGHT),
         "format": "RGB888",
-    }
+    },
+    transform=camera_transform,
 )
 
 camera.configure(camera_config)
@@ -210,6 +217,7 @@ def health():
         "camera_width": CAMERA_WIDTH,
         "camera_height": CAMERA_HEIGHT,
         "confidence": YOLO_CONF,
+        "rotate_camera_180": ROTATE_CAMERA_180,
     }
 
 
