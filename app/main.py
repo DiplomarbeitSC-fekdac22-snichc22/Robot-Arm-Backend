@@ -55,6 +55,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 print("Loading YOLO model...")
 model = YOLO(MODEL_PATH)
 print("YOLO model loaded.")
+print("Model classes:", model.names)
 
 
 # --------------------------------------------------
