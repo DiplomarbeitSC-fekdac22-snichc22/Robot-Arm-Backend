@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment
+.env
+
+# YOLO training files
+training/raw_images/
+training/new_upload/
+training/custom_data/
+training/backups/
+training/data.zip
+training/data.yaml
+training/latest_run.txt
+training/latest_model.txt
+training/new_upload_range.txt
+training/runs/
+
+# Trained models
+models/*.pt
+!models/.gitkeep
+
+# Generated runtime files
+runs/
+static/crops/*
+!static/crops/.gitkeep
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+# YOLO base models
+training/*.pt
