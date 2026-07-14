@@ -1,1 +1,0 @@
-/home/fekdac/Development/htl/diplomarbeit/Code/Robot-Arm-Backend/training/runs/manner_improvement_20260713_144146/weights/best.pt
