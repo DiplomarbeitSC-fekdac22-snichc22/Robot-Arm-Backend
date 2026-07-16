@@ -1,35 +1,24 @@
-import os
-import time
 import uuid
-import threading
 from datetime import datetime
-from pathlib import Path
 
 import cv2
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from ultralytics import YOLO
-from picamera2 import Picamera2
-from libcamera import controls, Transform
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
-
-MODEL_PATH = os.getenv("MODEL_PATH", "./best.pt")
-YOLO_CONF = float(os.getenv("YOLO_CONF", "0.30"))
-CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "1280"))
-CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "720"))
-ROTATE_CAMERA_180=os.getenv("ROTATE_CAMERA_180", "false").lower() == "true"
-
-MODEL_PATH = str((BASE_DIR / MODEL_PATH).resolve())
-
-STATIC_DIR = BASE_DIR / "static"
-CROPS_DIR = STATIC_DIR / "crops"
-CROPS_DIR.mkdir(parents=True, exist_ok=True)
-
+from .camera import raw_stream, read_camera, stop_camera
+from .config import (
+    CAMERA_HEIGHT,
+    CAMERA_WIDTH,
+    CROPS_DIR,
+    FRAMES_DIR,
+    MODEL_PATH,
+    ROTATE_CAMERA_180,
+    STATIC_DIR,
+    YOLO_CONF,
+)
+from .detection import detection_stream, parse_detections, run_detection
 
 # --------------------------------------------------
 # FastAPI setup
@@ -47,156 +36,6 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-
-# --------------------------------------------------
-# Set up Model
-# --------------------------------------------------
-
-print("Loading YOLO model...")
-model = YOLO(MODEL_PATH)
-print("YOLO model loaded.")
-print("Model classes:", model.names)
-
-
-# --------------------------------------------------
-# Set up Camera
-# --------------------------------------------------
-
-print("Starting Raspberry Pi Camera Module 3...")
-camera = Picamera2()
-
-camera_transform = Transform(
-    hflip=1 if ROTATE_CAMERA_180 else 0,
-    vflip=1 if ROTATE_CAMERA_180 else 0,
-)
-
-camera_config = camera.create_video_configuration(
-    main={
-        "size": (CAMERA_WIDTH, CAMERA_HEIGHT),
-        "format": "RGB888",
-    },
-    transform=camera_transform,
-)
-
-camera.configure(camera_config)
-camera.start()
-
-# Camera autofocus
-try:
-    camera.set_controls({
-        "AfMode": controls.AfModeEnum.Continuous
-    })
-except Exception as error:
-    print("Autofocus warning:", error)
-
-time.sleep(1)
-
-print("Pi camera started.")
-
-camera_lock = threading.Lock()
-
-
-# --------------------------------------------------
-# OLD WORKING CAMERA FUNCTIONS
-# Same logic as the prototype.
-# --------------------------------------------------
-
-def read_camera():
-    with camera_lock:
-        frame = camera.capture_array()
-
-    return frame
-
-
-def make_jpeg(frame):
-    success, buffer = cv2.imencode(".jpg", frame)
-
-    if not success:
-        return None
-
-    return buffer.tobytes()
-
-
-def send_frame(jpeg):
-    return (
-        b"--frame\r\n"
-        b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
-    )
-
-
-# --------------------------------------------------
-# Detection helper functions
-# --------------------------------------------------
-
-def run_detection(frame):
-    return model.predict(
-        source=frame,
-        imgsz=320,
-        conf=0.35,
-        iou=0.45,
-        max_det=10,
-        verbose=False,
-    )[0]
-
-
-def parse_detections(result):
-    detections = []
-
-    for box in result.boxes:
-        class_id = int(box.cls[0])
-        class_name = model.names[class_id]
-        confidence = float(box.conf[0])
-
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-        detections.append({
-            "id": str(uuid.uuid4()),
-            "class_id": class_id,
-            "class_name": class_name,
-            "confidence": round(confidence, 3),
-            "bbox": {
-                "x1": round(x1, 2),
-                "y1": round(y1, 2),
-                "x2": round(x2, 2),
-                "y2": round(y2, 2),
-            },
-            "center": {
-                "x": round((x1 + x2) / 2, 2),
-                "y": round((y1 + y2) / 2, 2),
-            },
-        })
-
-    return detections
-
-
-# --------------------------------------------------
-# OLD WORKING STREAMS
-# --------------------------------------------------
-
-def raw_stream():
-    while True:
-        frame = read_camera()
-
-        jpeg = make_jpeg(frame)
-
-        if jpeg is None:
-            continue
-
-        yield send_frame(jpeg)
-
-def detection_stream():
-    while True:
-        frame = read_camera()
-
-        result = run_detection(frame)
-        frame_with_boxes = result.plot()
-
-        jpeg = make_jpeg(frame_with_boxes)
-
-        if jpeg is None:
-            continue
-
-        yield send_frame(jpeg)
 
 # --------------------------------------------------
 # Endpoints
@@ -258,6 +97,12 @@ def objects(request: Request):
     height, width = frame.shape[:2]
     objects_list = []
 
+    # Save the full frame once for this request; all objects below share it.
+    frame_filename = f"frame_{uuid.uuid4().hex}.jpg"
+    frame_path = FRAMES_DIR / frame_filename
+    cv2.imwrite(str(frame_path), frame)
+    frame_url = str(request.base_url).rstrip("/") + f"/static/frames/{frame_filename}"
+
     for detection in detections:
         x1 = int(detection["bbox"]["x1"])
         y1 = int(detection["bbox"]["y1"])
@@ -285,6 +130,7 @@ def objects(request: Request):
         objects_list.append({
             **detection,
             "crop_url": crop_url,
+            "frame_url": frame_url,
             "timestamp": datetime.now().isoformat(),
         })
 
@@ -296,4 +142,4 @@ def objects(request: Request):
 
 @app.on_event("shutdown")
 def shutdown():
-    camera.stop()
+    stop_camera()
