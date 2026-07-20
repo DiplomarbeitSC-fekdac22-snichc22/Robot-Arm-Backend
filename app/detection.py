@@ -3,11 +3,8 @@ import uuid
 from ultralytics import YOLO
 
 from .camera import make_jpeg, read_camera, send_frame
-from .config import MODEL_PATH
+from .config import MODEL_PATH, YOLO_CONF
 
-# --------------------------------------------------
-# Model setup
-# --------------------------------------------------
 
 print("Loading YOLO model...")
 model = YOLO(MODEL_PATH)
@@ -15,15 +12,11 @@ print("YOLO model loaded.")
 print("Model classes:", model.names)
 
 
-# --------------------------------------------------
-# Detection helpers
-# --------------------------------------------------
-
 def run_detection(frame):
     return model.predict(
         source=frame,
         imgsz=320,
-        conf=0.35,
+        conf=YOLO_CONF,
         iou=0.45,
         max_det=10,
         verbose=False,
@@ -59,10 +52,6 @@ def parse_detections(result):
 
     return detections
 
-
-# --------------------------------------------------
-# Annotated MJPEG stream
-# --------------------------------------------------
 
 def detection_stream():
     while True:

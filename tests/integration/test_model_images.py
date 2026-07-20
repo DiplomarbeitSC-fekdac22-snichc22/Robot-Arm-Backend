@@ -1,10 +1,8 @@
-# tests/integration/test_model_images.py
-
 from pathlib import Path
 
 import cv2
 
-from app.main import run_detection
+from app.detection import run_detection
 
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -37,29 +35,31 @@ def test_back_of_car_is_not_detected_as_ball():
     image_path = FIXTURES / "car_back.jpeg"
     frame = cv2.imread(str(image_path))
 
-    assert frame is not None
+    assert frame is not None, f"Could not load {image_path}"
 
     result = run_detection(frame)
     detected_classes = get_detected_classes(result)
 
     assert "Ball" not in detected_classes
 
+
 def test_manner_package_is_detected():
     image_path = FIXTURES / "manner.jpeg"
     frame = cv2.imread(str(image_path))
 
-    assert frame is not None
+    assert frame is not None, f"Could not load {image_path}"
 
     result = run_detection(frame)
     detected_classes = get_detected_classes(result)
 
     assert "Manner" in detected_classes
 
+
 def test_single_manner_package_is_detected_once():
     image_path = FIXTURES / "manner.jpeg"
     frame = cv2.imread(str(image_path))
 
-    assert frame is not None
+    assert frame is not None, f"Could not load {image_path}"
 
     result = run_detection(frame)
     detected_classes = get_detected_classes(result)

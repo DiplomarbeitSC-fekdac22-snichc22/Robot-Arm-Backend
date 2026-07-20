@@ -1,4 +1,5 @@
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 import cv2
@@ -20,11 +21,20 @@ from .config import (
 )
 from .detection import detection_stream, parse_detections, run_detection
 
-# --------------------------------------------------
-# FastAPI setup
-# --------------------------------------------------
 
-app = FastAPI(title="Robot Arm Vision Backend")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Release the camera when the application shuts down."""
+    try:
+        yield
+    finally:
+        stop_camera()
+
+
+app = FastAPI(
+    title="Robot Arm Vision Backend",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,10 +46,6 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-
-# --------------------------------------------------
-# Endpoints
-# --------------------------------------------------
 
 @app.get("/")
 def root():
@@ -97,11 +103,13 @@ def objects(request: Request):
     height, width = frame.shape[:2]
     objects_list = []
 
-    # Save the full frame once for this request; all objects below share it.
     frame_filename = f"frame_{uuid.uuid4().hex}.jpg"
     frame_path = FRAMES_DIR / frame_filename
     cv2.imwrite(str(frame_path), frame)
-    frame_url = str(request.base_url).rstrip("/") + f"/static/frames/{frame_filename}"
+    frame_url = (
+        str(request.base_url).rstrip("/")
+        + f"/static/frames/{frame_filename}"
+    )
 
     for detection in detections:
         x1 = int(detection["bbox"]["x1"])
@@ -121,11 +129,12 @@ def objects(request: Request):
 
         filename = f"{detection['class_name']}_{uuid.uuid4().hex}.jpg"
         crop_path = CROPS_DIR / filename
-
-        # Same as prototype: no color conversion
         cv2.imwrite(str(crop_path), crop)
 
-        crop_url = str(request.base_url).rstrip("/") + f"/static/crops/{filename}"
+        crop_url = (
+            str(request.base_url).rstrip("/")
+            + f"/static/crops/{filename}"
+        )
 
         objects_list.append({
             **detection,
@@ -138,8 +147,3 @@ def objects(request: Request):
         "timestamp": datetime.now().isoformat(),
         "objects": objects_list,
     }
-
-
-@app.on_event("shutdown")
-def shutdown():
-    stop_camera()

@@ -1,8 +1,6 @@
-# tests/integration/test_camera_real.py
-
 import numpy as np
 
-from app.main import read_camera
+from app.camera import read_camera
 
 
 def test_real_camera_returns_an_image():

@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from app.main import run_detection
+from app.detection import run_detection
 
 
 def test_run_detection_returns_first_result():
@@ -10,10 +10,9 @@ def test_run_detection_returns_first_result():
         (720, 1280, 3),
         dtype=np.uint8,
     )
-
     fake_result = MagicMock()
 
-    with patch("app.main.model") as mock_model:
+    with patch("app.detection.model") as mock_model:
         mock_model.predict.return_value = [fake_result]
 
         result = run_detection(fake_frame)
@@ -28,7 +27,7 @@ def test_run_detection_uses_frame():
         dtype=np.uint8,
     )
 
-    with patch("app.main.model") as mock_model:
+    with patch("app.detection.model") as mock_model:
         mock_model.predict.return_value = [MagicMock()]
 
         run_detection(fake_frame)
