@@ -1,3 +1,4 @@
 pytest
 pytest-cov
 httpx
+httpx2>=2.7,<3
