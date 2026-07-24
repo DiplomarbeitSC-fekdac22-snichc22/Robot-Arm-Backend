@@ -1,0 +1,42 @@
+[paths]
+marker_layout = "calibration/shelf_markers.toml"
+model = "models/best.pt"
+capture_directory = "calibration/captures"
+calibration_output = "calibration/stereo_calibration.json"
+coordinates_output = "calibration/stereo_coordinates.json"
+
+[capture]
+width = 2304
+height = 1296
+focus_wait_seconds = 3.0
+jpeg_quality = 95
+
+[cameras.left]
+index = 0
+expected_z_sign = -1
+
+[cameras.right]
+index = 1
+expected_z_sign = 1
+
+[detection]
+class_names = ["Ball"]
+confidence = 0.30
+image_size = 640
+maximum_detections = 10
+maximum_epipolar_error_px = 25.0
+maximum_reprojection_error_px = 15.0
+
+[validation]
+maximum_marker_reprojection_rms_px = 5.0
+minimum_baseline_mm = 150.0
+maximum_baseline_mm = 450.0
+maximum_mirror_symmetry_error_mm = 80.0
+
+[workspace]
+x_min_mm = -100.0
+x_max_mm = 600.0
+y_min_mm = 0.0
+y_max_mm = 500.0
+z_min_mm = -250.0
+z_max_mm = 250.0

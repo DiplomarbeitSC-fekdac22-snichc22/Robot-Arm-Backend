@@ -1,0 +1,35 @@
+[coordinate_system]
+name = "robot_base"
+units = "mm"
+origin = "J1 base rotation axis at the top"
+x_positive = "toward the objects"
+y_positive = "down"
+z_positive = "right when looking toward the objects"
+
+[aruco]
+dictionary = "DICT_4X4_50"
+shelf_marker_size_mm = 14.0
+
+[markers."20"]
+role = "shelf_top_left"
+center_mm = [130.0, 140.0, -190.0]
+orientation = "upright"
+facing = "-x"
+
+[markers."21"]
+role = "shelf_top_right"
+center_mm = [130.0, 140.0, 190.0]
+orientation = "upright"
+facing = "-x"
+
+[markers."22"]
+role = "shelf_bottom_left"
+center_mm = [130.0, 372.0, -190.0]
+orientation = "upright"
+facing = "-x"
+
+[markers."23"]
+role = "shelf_bottom_right"
+center_mm = [130.0, 372.0, 190.0]
+orientation = "upright"
+facing = "-x"
