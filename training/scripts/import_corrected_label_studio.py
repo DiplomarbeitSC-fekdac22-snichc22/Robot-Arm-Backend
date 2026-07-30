@@ -32,7 +32,8 @@ SUPPORTED_IMAGES = {
 TARGET_CLASSES = {
     "ball": 0,
     "car": 1,
-    "manner": 2,
+    "cube": 2,
+    "manner": 3,
 }
 
 

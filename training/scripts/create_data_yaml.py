@@ -10,6 +10,7 @@ DATA_YAML_FILE = TRAINING_DIR / "data.yaml"
 EXPECTED_CLASSES = [
     "Ball",
     "Car",
+    "Cube",
     "Manner",
 ]
 
@@ -45,8 +46,9 @@ def main() -> None:
 
     lines = [
         f"path: {CUSTOM_DATA_DIR.resolve()}",
-        "train: train/images",
-        "val: validation/images",
+        "train: images/train",
+        "val: images/val",
+        "test: images/test",
         f"nc: {len(classes)}",
         "names:",
     ]
