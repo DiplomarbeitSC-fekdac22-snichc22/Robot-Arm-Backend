@@ -24,7 +24,7 @@ models/*.pt
 !models/.gitkeep
 
 # Generated runtime files
-runs/
+training/runs/
 static/crops/*
 !static/crops/.gitkeep
 

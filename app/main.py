@@ -1,11 +1,21 @@
+from __future__ import annotations
+
 import logging
 import uuid
 
 import cv2
-from fastapi import FastAPI, Request
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Request,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import (
+    JSONResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from .camera import (
     camera_is_running,
@@ -33,20 +43,29 @@ from .errors import (
     DetectionUnavailableError,
     ImageSaveError,
 )
+from .kinematics_bridge import (
+    KinematicsBridgeError,
+    run_hardware_pick,
+    run_scan_pose,
+)
+from .localization import (
+    FIXED_TARGET_X_MM,
+    LocalizationError,
+    localize_detection,
+)
 
-
-# --------------------------------------------------
-# Logging
-# --------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------
-# FastAPI setup
-# --------------------------------------------------
+# Requested coordinate corrections.
+Y_COORDINATE_OFFSET_MM = 20.0
+Z_COORDINATE_SCALE = 0.9
 
-app = FastAPI(title="Robot Arm Vision Backend")
+
+app = FastAPI(
+    title="Robot Arm Vision Backend",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,9 +82,20 @@ app.mount(
 )
 
 
-# --------------------------------------------------
-# Exception handlers
-# --------------------------------------------------
+class KinematicsTargetRequest(BaseModel):
+    object_id: str = Field(min_length=1)
+    class_name: str = Field(min_length=1)
+
+    y_mm: float = Field(
+        ge=0.0,
+        le=500.0,
+    )
+
+    z_mm: float = Field(
+        ge=-180.0,
+        le=180.0,
+    )
+
 
 @app.exception_handler(AppError)
 async def app_error_handler(
@@ -112,21 +142,27 @@ async def unexpected_error_handler(
         content={
             "status": "error",
             "code": "INTERNAL_ERROR",
-            "message": "An unexpected backend error occurred",
+            "message": (
+                "An unexpected backend error occurred"
+            ),
             "movement_allowed": False,
             "movement_started": False,
         },
     )
 
 
-# --------------------------------------------------
-# Helpers
-# --------------------------------------------------
-
-def require_detection_snapshot(timeout=5.0):
+def require_detection_snapshot(
+    timeout: float = 5.0,
+):
     try:
-        snapshot = get_detection_snapshot(timeout=timeout)
-    except (RuntimeError, TimeoutError) as error:
+        snapshot = get_detection_snapshot(
+            timeout=timeout,
+        )
+
+    except (
+        RuntimeError,
+        TimeoutError,
+    ) as error:
         logger.exception(
             "Could not get detection snapshot"
         )
@@ -138,10 +174,6 @@ def require_detection_snapshot(timeout=5.0):
 
     return snapshot
 
-
-# --------------------------------------------------
-# Endpoints
-# --------------------------------------------------
 
 @app.get("/")
 def root():
@@ -166,15 +198,14 @@ def health():
         "camera_width": CAMERA_WIDTH,
         "camera_height": CAMERA_HEIGHT,
         "confidence": YOLO_CONF,
-        "rotate_camera_180": ROTATE_CAMERA_180,
+        "rotate_camera_180": (
+            ROTATE_CAMERA_180
+        ),
     }
 
 
 @app.get("/video")
 def video():
-    """
-    Raw camera MJPEG stream.
-    """
     if not camera_is_running():
         raise CameraUnavailableError()
 
@@ -189,15 +220,12 @@ def video():
 
 @app.get("/detect")
 def detect():
-    """
-    YOLO-annotated MJPEG stream.
-    """
     if not camera_is_running():
         raise CameraUnavailableError()
 
-    # Wait briefly for the detection worker to produce its
-    # first result before opening the stream.
-    require_detection_snapshot(timeout=2.0)
+    require_detection_snapshot(
+        timeout=2.0,
+    )
 
     return StreamingResponse(
         detection_stream(),
@@ -210,9 +238,6 @@ def detect():
 
 @app.get("/detections")
 def detections():
-    """
-    Return the latest cached YOLO detections.
-    """
     snapshot = require_detection_snapshot()
 
     return {
@@ -223,9 +248,6 @@ def detections():
 
 @app.get("/objects")
 def objects(request: Request):
-    """
-    Return the latest detected objects and save their crops.
-    """
     snapshot = require_detection_snapshot()
 
     frame = snapshot["frame"]
@@ -233,13 +255,16 @@ def objects(request: Request):
     timestamp = snapshot["timestamp"]
 
     height, width = frame.shape[:2]
-    objects_list = []
 
-    # Save the full frame once for all detected objects.
+    objects_list: list[dict] = []
+
     frame_filename = (
         f"frame_{uuid.uuid4().hex}.jpg"
     )
-    frame_path = FRAMES_DIR / frame_filename
+
+    frame_path = (
+        FRAMES_DIR / frame_filename
+    )
 
     frame_saved = cv2.imwrite(
         str(frame_path),
@@ -249,7 +274,9 @@ def objects(request: Request):
     if not frame_saved:
         raise ImageSaveError()
 
-    base_url = str(request.base_url).rstrip("/")
+    base_url = str(
+        request.base_url
+    ).rstrip("/")
 
     frame_url = (
         f"{base_url}/static/frames/"
@@ -260,10 +287,10 @@ def objects(request: Request):
         try:
             bbox = detection["bbox"]
 
-            x1 = int(bbox["x1"])
-            y1 = int(bbox["y1"])
-            x2 = int(bbox["x2"])
-            y2 = int(bbox["y2"])
+            x1 = int(float(bbox["x1"]))
+            y1 = int(float(bbox["y1"]))
+            x2 = int(float(bbox["x2"]))
+            y2 = int(float(bbox["y2"]))
 
         except (
             KeyError,
@@ -276,18 +303,55 @@ def objects(request: Request):
             )
             continue
 
-        # Keep coordinates inside the image.
         x1 = max(0, min(width, x1))
         x2 = max(0, min(width, x2))
         y1 = max(0, min(height, y1))
         y2 = max(0, min(height, y2))
 
-        # Ignore invalid or zero-sized boxes.
         if x2 <= x1 or y2 <= y1:
             logger.warning(
                 "Ignoring invalid bounding box: %r",
                 bbox,
             )
+            continue
+
+        try:
+            robot_coordinates = localize_detection(
+                frame.shape,
+                detection,
+            )
+
+            # Requested calibration corrections:
+            # Y = calculated Y + 20 mm
+            # Z = calculated Z * 0.9
+            robot_coordinates["y_mm"] = round(
+                float(
+                    robot_coordinates["y_mm"]
+                )
+                + Y_COORDINATE_OFFSET_MM,
+                1,
+            )
+
+            robot_coordinates["z_mm"] = round(
+                float(
+                    robot_coordinates["z_mm"]
+                )
+                * Z_COORDINATE_SCALE,
+                1,
+            )
+
+        except LocalizationError as error:
+            logger.warning(
+                "Could not localize %s detection: %s",
+                detection.get(
+                    "class_name",
+                    "unknown",
+                ),
+                error,
+            )
+
+            # Do not return selectable objects that
+            # cannot be sent to Kinematics.
             continue
 
         crop = frame[y1:y2, x1:x2]
@@ -308,7 +372,10 @@ def objects(request: Request):
             f"class_{class_id}_"
             f"{uuid.uuid4().hex}.jpg"
         )
-        crop_path = CROPS_DIR / crop_filename
+
+        crop_path = (
+            CROPS_DIR / crop_filename
+        )
 
         crop_saved = cv2.imwrite(
             str(crop_path),
@@ -329,6 +396,9 @@ def objects(request: Request):
 
         objects_list.append({
             **detection,
+            "robot_coordinates": (
+                robot_coordinates
+            ),
             "crop_url": crop_url,
             "frame_url": frame_url,
             "timestamp": timestamp,
@@ -340,14 +410,90 @@ def objects(request: Request):
     }
 
 
-# --------------------------------------------------
-# Shutdown
-# --------------------------------------------------
+@app.post("/kinematics/target")
+def send_kinematics_target(
+    payload: KinematicsTargetRequest,
+):
+    target = {
+        "x_mm": FIXED_TARGET_X_MM,
+        "y_mm": round(
+            float(payload.y_mm),
+            1,
+        ),
+        "z_mm": round(
+            float(payload.z_mm),
+            1,
+        ),
+    }
+
+    logger.info(
+        "Kinematics target requested: "
+        "object=%s class=%s target=%r",
+        payload.object_id,
+        payload.class_name,
+        target,
+    )
+
+    try:
+        result = run_hardware_pick(
+            x_mm=target["x_mm"],
+            y_mm=target["y_mm"],
+            z_mm=target["z_mm"],
+        )
+
+    except KinematicsBridgeError as error:
+        logger.error(
+            "Kinematics hardware run failed: %s",
+            error,
+        )
+
+        return JSONResponse(
+            status_code=502,
+            content={
+                "status": "error",
+                "code": "KINEMATICS_FAILED",
+                "message": str(error),
+                "movement_allowed": False,
+                "movement_started": False,
+            },
+        )
+
+    logger.info(
+        "Kinematics hardware run completed: "
+        "object=%s target=%r",
+        payload.object_id,
+        target,
+    )
+
+    return {
+        "status": "accepted",
+        "object_id": payload.object_id,
+        "class_name": payload.class_name,
+        "target": target,
+        "kinematics": result,
+    }
+
+
+@app.post("/kinematics/scan-pose")
+def move_to_scan_pose():
+    try:
+        return {
+            "status": "completed",
+            "kinematics": run_scan_pose(),
+        }
+
+    except KinematicsBridgeError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=str(error),
+        ) from error
+
 
 @app.on_event("shutdown")
 def shutdown():
     try:
         stop_detection()
+
     except Exception:
         logger.exception(
             "Could not stop detection worker"
@@ -355,6 +501,7 @@ def shutdown():
 
     try:
         stop_camera()
+
     except Exception:
         logger.exception(
             "Could not stop camera"
