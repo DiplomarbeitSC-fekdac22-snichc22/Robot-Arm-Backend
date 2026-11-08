@@ -1,5 +1,6 @@
 from app.camera import read_camera
-from app.detection import model, run_detection
+from app import detection
+from app.detection import run_detection
 
 
 EXPECTED_CLASSES = {
@@ -10,7 +11,7 @@ EXPECTED_CLASSES = {
 
 
 def test_real_model_has_expected_classes():
-    assert model.names == EXPECTED_CLASSES
+    assert detection.model.names == EXPECTED_CLASSES
 
 
 def test_real_detection_runs_without_crashing():

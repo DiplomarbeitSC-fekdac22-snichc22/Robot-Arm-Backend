@@ -11,7 +11,6 @@ from typing import Any
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
 
 SHELF_MARKER_IDS = {20, 21, 22, 23}
@@ -61,6 +60,8 @@ def load_toml(path: Path) -> dict[str, Any]:
 
 
 def save_json(path: Path, value: dict[str, Any]) -> None:
+    if path.exists():
+        raise FileExistsError(f"Preserving existing calibration result: {path}; configure a new output path")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(value, indent=2) + "\n",
@@ -69,6 +70,8 @@ def save_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def save_image(path: Path, image: np.ndarray, quality: int = 95) -> None:
+    if path.exists():
+        raise FileExistsError(f"Preserving existing capture: {path}; configure a new capture_directory")
     path.parent.mkdir(parents=True, exist_ok=True)
     success = cv2.imwrite(
         str(path),
@@ -85,6 +88,7 @@ def capture_two_cameras(
     width: int,
     height: int,
     focus_wait_seconds: float,
+    lens_positions: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     try:
         from libcamera import controls
@@ -95,6 +99,8 @@ def capture_two_cameras(
         ) from error
 
     camera_info = Picamera2.global_camera_info()
+    if min(left_index, right_index) < 0 or left_index == right_index:
+        raise ValueError("Select two different nonnegative camera indices")
     required_index = max(left_index, right_index)
     if len(camera_info) <= required_index:
         raise RuntimeError(
@@ -102,13 +108,13 @@ def capture_two_cameras(
             f"{len(camera_info)} camera(s): {camera_info}"
         )
 
-    left_camera = Picamera2(camera_num=left_index)
-    right_camera = Picamera2(camera_num=right_index)
-    cameras = [left_camera, right_camera]
-
+    cameras = []
     try:
-        for camera in cameras:
-            configuration = camera.create_still_configuration(
+        cameras.append(Picamera2(camera_num=left_index))
+        cameras.append(Picamera2(camera_num=right_index))
+        left_camera, right_camera = cameras
+        for index, camera in enumerate(cameras):
+            configuration = camera.create_video_configuration(
                 main={
                     "size": (width, height),
                     "format": "RGB888",
@@ -116,9 +122,9 @@ def capture_two_cameras(
             )
             camera.configure(configuration)
             camera.start()
-            camera.set_controls(
-                {"AfMode": controls.AfModeEnum.Continuous}
-            )
+            camera.set_controls({"AfMode": controls.AfModeEnum.Manual,
+                                 "LensPosition": lens_positions[index]} if lens_positions is not None
+                                else {"AfMode": controls.AfModeEnum.Continuous})
 
         time.sleep(focus_wait_seconds)
 
@@ -377,6 +383,7 @@ def estimate_camera_pose(
     image: np.ndarray,
     marker_layout: dict[str, Any],
     expected_z_sign: int,
+    intrinsics: dict[str, Any] | None = None,
 ) -> CameraPose:
     detected, _, _ = detect_shelf_markers(image)
     missing = SHELF_MARKER_IDS - set(detected)
@@ -414,6 +421,18 @@ def estimate_camera_pose(
     image_points = np.concatenate(image_groups).astype(np.float64)
 
     height, width = image.shape[:2]
+    if intrinsics is not None:
+        if intrinsics["image_size"] != {"width": width, "height": height}:
+            raise ValueError("Intrinsic calibration and oriented shelf image resolutions differ")
+        matrix = np.asarray(intrinsics["camera_matrix"], dtype=np.float64)
+        distortion = np.asarray(intrinsics["distortion_coefficients"], dtype=np.float64).reshape(-1, 1)
+        result = fit_pose(object_points, image_points, matrix, distortion)
+        if result is None:
+            raise RuntimeError("Could not fit marker pose using calibrated intrinsics")
+        rms, rotation, translation, position = result
+        if float(position[2, 0]) * expected_z_sign <= 0:
+            raise RuntimeError("Camera is on the wrong Z side; verify camera identity and marker layout")
+        return CameraPose(matrix, distortion, rotation, translation, position, float(matrix[0, 0]), rms)
     distortion = np.zeros((5, 1), dtype=np.float64)
     low = width * 0.45
     high = width * 2.0
@@ -530,7 +549,7 @@ def projection_matrix(pose: CameraPose) -> np.ndarray:
 
 
 def detect_objects(
-    model: YOLO,
+    model: Any,
     image: np.ndarray,
     class_names: set[str],
     confidence: float,
@@ -759,12 +778,12 @@ def match_and_triangulate(
             if epi_error > maximum_epipolar_error_px:
                 continue
 
-            point = triangulate_world_point(
-                left_pixel,
-                right_pixel,
-                left_pose,
-                right_pose,
-            )
+            try:
+                point = triangulate_world_point(left_pixel, right_pixel, left_pose, right_pose)
+            except (RuntimeError, cv2.error):
+                continue
+            if not np.isfinite(point).all():
+                continue
             if not point_is_in_front(point, left_pose):
                 continue
             if not point_is_in_front(point, right_pose):
@@ -780,9 +799,7 @@ def match_and_triangulate(
             right_error = float(
                 np.linalg.norm(projected_right - right_pixel)
             )
-            reprojection_error = 0.5 * (
-                left_error + right_error
-            )
+            reprojection_error = max(left_error, right_error)
             if (
                 reprojection_error
                 > maximum_reprojection_error_px
@@ -821,6 +838,9 @@ def match_and_triangulate(
     for candidate in candidates:
         left_index = int(candidate["left_index"])
         right_index = int(candidate["right_index"])
+        if (sum(c["left_index"] == left_index for c in candidates) != 1
+                or sum(c["right_index"] == right_index for c in candidates) != 1):
+            continue
         if left_index in matched_left or right_index in matched_right:
             continue
 
@@ -936,6 +956,18 @@ def main() -> None:
         paths["coordinates_output"],
     )
 
+    if calibration_output.exists() or coordinates_output.exists():
+        raise FileExistsError("Preserve existing results: configure new calibration_output and coordinates_output paths")
+    intrinsics = {}
+    for side in ("left", "right"):
+        path = cameras_config[side].get("intrinsics")
+        if not path:
+            raise ValueError(f"Configure cameras.{side}.intrinsics after multi-view ChArUco calibration")
+        intrinsics[side] = json.loads(resolve_path(repository_root, path).read_text())
+        if (intrinsics[side].get("intrinsics_calibrated") is not True
+                or intrinsics[side]["camera_index"] != cameras_config[side]["index"]):
+            raise ValueError(f"Camera {side} intrinsic file is provisional or belongs to a different camera")
+
     capture_directory.mkdir(parents=True, exist_ok=True)
     raw_left_path = capture_directory / "stereo_left_raw.jpg"
     raw_right_path = capture_directory / "stereo_right_raw.jpg"
@@ -962,6 +994,7 @@ def main() -> None:
             int(capture_config["width"]),
             int(capture_config["height"]),
             float(capture_config["focus_wait_seconds"]),
+            tuple(float(intrinsics[side]["lens_position"]) for side in ("left", "right")),
         )
         capture_metadata.update(camera_metadata)
         save_image(
@@ -992,6 +1025,9 @@ def main() -> None:
         right_image,
         int(capture_config["jpeg_quality"]),
     )
+    for side, rotation in (("left", left_rotation_degrees), ("right", right_rotation_degrees)):
+        if rotation != intrinsics[side]["rotation_degrees"]:
+            raise ValueError(f"Camera {side} image rotation differs from intrinsic calibration")
 
     if left_image.shape[:2] != right_image.shape[:2]:
         raise RuntimeError(
@@ -1005,12 +1041,14 @@ def main() -> None:
         left_image,
         marker_layout,
         int(cameras_config["left"]["expected_z_sign"]),
+        intrinsics["left"],
     )
     print("Estimating right camera pose...")
     right_pose = estimate_camera_pose(
         right_image,
         marker_layout,
         int(cameras_config["right"]["expected_z_sign"]),
+        intrinsics["right"],
     )
 
     baseline_mm = float(
@@ -1086,12 +1124,14 @@ def main() -> None:
         )
 
     calibration_data = {
-        "status": "automatic_fixed_marker_stereo_calibration",
-        "warning": (
-            "Camera poses are calibrated from one fixed planar shelf-marker "
-            "view. Lens distortion remains zero until a multi-view intrinsic "
-            "calibration is supplied."
-        ),
+        "status": "fixed_marker_stereo_calibration",
+        "intrinsics_calibrated": True,
+        "shelf_layout_physically_validated": marker_layout["coordinate_system"].get("shelf_layout_physically_validated", False),
+        "coordinate_system": marker_layout["coordinate_system"],
+        "workspace": workspace,
+        "maximum_epipolar_error_px": float(detection_config["maximum_epipolar_error_px"]),
+        "maximum_reprojection_error_px": float(detection_config["maximum_reprojection_error_px"]),
+        "warning": "Bounding-box centres are stereo estimates, not validated grasp points. Verify independent distances.",
         "image_size": {
             "width": int(left_image.shape[1]),
             "height": int(left_image.shape[0]),
@@ -1099,14 +1139,18 @@ def main() -> None:
         "left_image_rotation_degrees": left_rotation_degrees,
         "right_image_rotation_degrees": right_rotation_degrees,
         "capture_metadata": capture_metadata,
-        "left_camera": pose_to_json(left_pose),
-        "right_camera": pose_to_json(right_pose),
+        "left_camera": {**pose_to_json(left_pose), **{key: intrinsics["left"][key]
+                        for key in ("camera_index", "rotation_degrees", "image_size", "lens_position")}},
+        "right_camera": {**pose_to_json(right_pose), **{key: intrinsics["right"][key]
+                         for key in ("camera_index", "rotation_degrees", "image_size", "lens_position")}},
         "baseline_mm": baseline_mm,
         "mirror_symmetry_error": symmetry_error,
     }
     save_json(calibration_output, calibration_data)
 
     print("Running YOLO on both images...")
+    from ultralytics import YOLO
+
     model = YOLO(str(model_path))
     class_names = {
         str(name)
@@ -1148,25 +1192,18 @@ def main() -> None:
         workspace,
     )
 
-    target_match_id = (
-        int(matches[0]["match_id"])
-        if matches
-        else None
-    )
+    target_match_id = None
     for match in matches:
-        match["is_target"] = (
-            int(match["match_id"]) == target_match_id
-        )
+        match.update(is_target=False, grasp_valid=False, point_type="bbox_center",
+                     valid=calibration_data["shelf_layout_physically_validated"])
 
     coordinates_data = {
         "mode": "real_stereo",
         "units": "mm",
         "coordinate_system": marker_layout["coordinate_system"],
         "baseline_mm": baseline_mm,
-        "target_selection": (
-            "smallest robot Y coordinate among valid matches"
-        ),
-        "target": matches[0] if matches else None,
+        "target_selection": "No grasp target: bounding-box centres require separate grasp validation",
+        "target": None,
         "matches": matches,
         "unmatched_left_detection_indices": sorted(
             set(range(len(left_detections))) - matched_left

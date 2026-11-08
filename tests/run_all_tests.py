@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -58,6 +59,7 @@ def main() -> None:
         ],
     )
 
+    os.environ["RUN_HARDWARE_TESTS"] = "1"
     integration_result = run_test_group(
         "RASPBERRY PI INTEGRATION TESTS",
         [

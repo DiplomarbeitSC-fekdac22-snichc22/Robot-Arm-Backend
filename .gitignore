@@ -34,3 +34,9 @@ static/crops/*
 .DS_Store
 # YOLO base models
 training/*.pt
+
+static/frames/*
+calibration/captures/
+calibration/*intrinsics*.json
+calibration/stereo_calibration*.json
+calibration/stereo_coordinates*.json

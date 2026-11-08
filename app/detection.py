@@ -2,197 +2,154 @@ import copy
 import threading
 import time
 import uuid
-from datetime import datetime
 
-from ultralytics import YOLO
-
-from .camera import (
-    camera_is_running,
-    make_jpeg,
-    send_frame,
-    wait_for_frame,
-)
-from .config import MODEL_PATH, YOLO_CONF
+from .camera import camera_is_running, make_jpeg, send_frame, wait_for_frame_packet
+from .config import CAMERA_CONFIGS, MAX_FRAME_AGE_SECONDS, MODEL_PATH, YOLO_CONF
 
 
-print("Loading YOLO model...")
-model = YOLO(MODEL_PATH)
-print("YOLO model loaded.")
-print("Model classes:", model.names)
-
-
-# Prevent accidental simultaneous use of the same model.
+model = None
 _model_lock = threading.Lock()
-
-_detection_condition = threading.Condition()
-_detection_running = threading.Event()
-
-_latest_detection_sequence = -1
-_latest_annotated_jpeg = None
-_latest_detections = []
-_latest_detection_frame = None
-_latest_detection_timestamp = None
+_condition = threading.Condition()
+_running = threading.Event()
+_thread = None
+_error = "Detection has not started"
+_snapshots = {}
+_jpegs = {}
 
 
 def run_detection(frame):
     with _model_lock:
-        return model.predict(
-            source=frame,
-            imgsz=320,
-            conf=YOLO_CONF,
-            iou=0.45,
-            max_det=10,
-            verbose=False,
-        )[0]
+        if model is None:
+            raise RuntimeError(_error)
+        return model.predict(source=frame, imgsz=320, conf=YOLO_CONF, iou=0.45,
+                             max_det=10, verbose=False)[0]
 
 
-def parse_detections(result):
+def parse_detections(result, camera_id="left"):
     detections = []
-
     for box in result.boxes:
         class_id = int(box.cls[0])
-        class_name = model.names[class_id]
-        confidence = float(box.conf[0])
-
         x1, y1, x2, y2 = box.xyxy[0].tolist()
-
         detections.append({
-            "id": str(uuid.uuid4()),
-            "class_id": class_id,
-            "class_name": class_name,
-            "confidence": round(confidence, 3),
-            "bbox": {
-                "x1": round(x1, 2),
-                "y1": round(y1, 2),
-                "x2": round(x2, 2),
-                "y2": round(y2, 2),
-            },
-            "center": {
-                "x": round((x1 + x2) / 2, 2),
-                "y": round((y1 + y2) / 2, 2),
-            },
+            "id": str(uuid.uuid4()), "camera_id": camera_id,
+            "class_id": class_id, "class_name": model.names[class_id],
+            "confidence": round(float(box.conf[0]), 3),
+            "bbox": dict(zip(("x1", "y1", "x2", "y2"),
+                             (round(value, 2) for value in (x1, y1, x2, y2)))),
+            "center": {"x": round((x1 + x2) / 2, 2), "y": round((y1 + y2) / 2, 2)},
         })
-
     return detections
 
 
 def _detection_loop():
-    global _latest_detection_sequence
-    global _latest_annotated_jpeg
-    global _latest_detections
-    global _latest_detection_frame
-    global _latest_detection_timestamp
-
-    camera_sequence = -1
-
+    global _error
+    sequences = {side: -1 for side in CAMERA_CONFIGS}
     try:
-        while _detection_running.is_set():
-            item = wait_for_frame(camera_sequence)
-
-            if item is None:
-                if not camera_is_running():
-                    break
-
-                continue
-
-            camera_sequence, frame = item
-
-            try:
-                result = run_detection(frame)
-                detections = parse_detections(result)
-                annotated_frame = result.plot()
-                annotated_jpeg = make_jpeg(annotated_frame)
-
-                if annotated_jpeg is None:
+        while _running.is_set():
+            # Capture both observations before running the shared model.
+            packets = {side: wait_for_frame_packet(sequences[side], timeout=0.1, camera_id=side)
+                       for side in CAMERA_CONFIGS if camera_is_running(side)}
+            snapshots, jpegs = {}, {}
+            for side, packet in packets.items():
+                if packet is None or not _running.is_set():
                     continue
-
-                timestamp = datetime.now().isoformat()
-
-                with _detection_condition:
-                    _latest_detection_sequence = camera_sequence
-                    _latest_annotated_jpeg = annotated_jpeg
-                    _latest_detections = detections
-                    _latest_detection_frame = frame
-                    _latest_detection_timestamp = timestamp
-                    _detection_condition.notify_all()
-
-            except Exception as error:
-                print("Detection error:", error)
+                sequences[side] = packet["sequence"]
+                try:
+                    result = run_detection(packet["frame"])
+                    detections = parse_detections(result, side)
+                    jpeg = make_jpeg(result.plot())
+                    if jpeg is None:
+                        raise RuntimeError("Could not encode detection frame")
+                    snapshots[side] = {**packet, "detections": detections}
+                    jpegs[side] = jpeg
+                    _error = None
+                except Exception as error:
+                    _error = str(error)
+                    print(f"Camera {side} detection error:", error)
+            with _condition:
+                _snapshots.clear()
+                _jpegs.clear()
+                if _running.is_set():
+                    _snapshots.update(snapshots)
+                    _jpegs.update(jpegs)
+                _condition.notify_all()
+            if not snapshots:
                 time.sleep(0.1)
-
     finally:
-        _detection_running.clear()
+        _running.clear()
+        with _condition:
+            _condition.notify_all()
 
-        with _detection_condition:
-            _detection_condition.notify_all()
+
+def start_detection():
+    global model, _thread, _error
+    if _running.is_set():
+        return
+    try:
+        if model is None:
+            from ultralytics import YOLO
+            model = YOLO(MODEL_PATH)
+        _running.set()
+        _error = None
+        _thread = threading.Thread(target=_detection_loop, name="yolo-detection", daemon=True)
+        _thread.start()
+    except Exception as error:
+        _error = str(error)
+        print("Detection unavailable:", error)
 
 
-def detection_stream():
+def _fresh(side):
+    snapshot = _snapshots.get(side)
+    return snapshot is not None and camera_is_running(side) and (
+        time.monotonic() - snapshot["captured_at"] <= MAX_FRAME_AGE_SECONDS
+    )
+
+
+def detection_status():
+    return {"available": _running.is_set(), "error": _error,
+            "cameras": {side: _fresh(side) for side in CAMERA_CONFIGS}}
+
+
+def get_detection_snapshots(timeout=0.0):
+    with _condition:
+        _condition.wait_for(lambda: any(_fresh(side) for side in CAMERA_CONFIGS)
+                            or not _running.is_set(), timeout=timeout)
+        return {side: {**snapshot, "detections": copy.deepcopy(snapshot["detections"])}
+                for side, snapshot in _snapshots.items() if _fresh(side)}
+
+
+def get_detection_snapshot(timeout=10.0, camera_id="left"):
+    with _condition:
+        _condition.wait_for(lambda: _fresh(camera_id) or not _running.is_set(), timeout=timeout)
+        snapshot = _snapshots.get(camera_id) if _fresh(camera_id) else None
+        if snapshot is None:
+            return None
+        return {**snapshot, "frame": snapshot["frame"].copy(),
+                "detections": copy.deepcopy(snapshot["detections"])}
+
+
+def detection_stream(camera_id="left"):
     sequence = -1
-
-    while _detection_running.is_set():
-        with _detection_condition:
-            available = _detection_condition.wait_for(
-                lambda: (
-                    not _detection_running.is_set()
-                    or (
-                        _latest_annotated_jpeg is not None
-                        and _latest_detection_sequence != sequence
-                    )
-                ),
-                timeout=1.0,
+    while _running.is_set() and camera_is_running(camera_id):
+        with _condition:
+            available = _condition.wait_for(
+                lambda: not _running.is_set() or not camera_is_running(camera_id) or (
+                    _fresh(camera_id) and _snapshots[camera_id]["sequence"] != sequence
+                ), timeout=1.0,
             )
-
-            if not _detection_running.is_set():
-                break
-
-            if not available or _latest_annotated_jpeg is None:
+            if not available or not _fresh(camera_id):
                 continue
-
-            sequence = _latest_detection_sequence
-            jpeg = _latest_annotated_jpeg
-
+            sequence = _snapshots[camera_id]["sequence"]
+            jpeg = _jpegs[camera_id]
         yield send_frame(jpeg)
 
 
-def get_detection_snapshot(timeout=10.0):
-    """Return detections and their corresponding camera frame."""
-    with _detection_condition:
-        available = _detection_condition.wait_for(
-            lambda: (
-                _latest_detection_frame is not None
-                or not _detection_running.is_set()
-            ),
-            timeout=timeout,
-        )
-
-        if not available or _latest_detection_frame is None:
-            return None
-
-        return {
-            "timestamp": _latest_detection_timestamp,
-            "detections": copy.deepcopy(_latest_detections),
-            "frame": _latest_detection_frame.copy(),
-        }
-
-
 def stop_detection():
-    if not _detection_running.is_set():
-        return
-
-    _detection_running.clear()
-
-    with _detection_condition:
-        _detection_condition.notify_all()
-
-    _detection_thread.join(timeout=3)
-
-
-_detection_running.set()
-
-_detection_thread = threading.Thread(
-    target=_detection_loop,
-    name="yolo-detection",
-    daemon=True,
-)
-_detection_thread.start()
+    _running.clear()
+    with _condition:
+        _condition.notify_all()
+    if _thread is not None:
+        _thread.join(timeout=10)
+    with _condition:
+        _snapshots.clear()
+        _jpegs.clear()

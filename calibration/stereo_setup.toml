@@ -6,26 +6,28 @@ calibration_output = "calibration/stereo_calibration.json"
 coordinates_output = "calibration/stereo_coordinates.json"
 
 [capture]
-width = 2304
-height = 1296
+width = 1280
+height = 720
 focus_wait_seconds = 3.0
 jpeg_quality = 95
 
 [cameras.left]
 index = 0
 expected_z_sign = -1
+intrinsics = "calibration/left_intrinsics.json"
 
 [cameras.right]
 index = 1
 expected_z_sign = 1
+intrinsics = "calibration/right_intrinsics.json"
 
 [detection]
 class_names = ["Ball"]
 confidence = 0.30
 image_size = 640
 maximum_detections = 10
-maximum_epipolar_error_px = 25.0
-maximum_reprojection_error_px = 15.0
+maximum_epipolar_error_px = 2.0
+maximum_reprojection_error_px = 2.0
 
 [validation]
 maximum_marker_reprojection_rms_px = 5.0
